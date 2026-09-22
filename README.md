@@ -585,7 +585,7 @@ Active chess games produce frequent, low-latency state changes (moves, timer tic
 | `GET` | `/health` | No | Health check. Returns `{ success: true, message: "Checkmate API is running" }`. |
 | `GET` | `/uploads/:filename` | No | Serves uploaded profile images as static files. |
 
-### Request & Response Examples
+ ### Request & Response Examples
 
 <details>
 <summary><strong>POST /api/v1/auth/send-otp</strong></summary>
