@@ -28,6 +28,7 @@ The backend is fully implemented with:
 - Per-game Redis locking for move concurrency
 - 30-second per-turn timer (backend-validated timestamps)
 - Game history REST endpoints with pagination
+- Play against bot — single-player mode, random legal moves via chess.js
 
 ## Tech stack
 
@@ -73,7 +74,7 @@ These are load-bearing. Violating them is a defect, not a style choice.
 `User`, `Game`, `Move` — three collections total.
 
 - **User**: username (unique), name, email (unique), dateOfBirth, profileImage
-- **Game**: whitePlayerId, blackPlayerId, winnerId, status, result, startedAt, endedAt, totalMoves
+- **Game**: whitePlayerId, blackPlayerId, winnerId, status, result, startedAt, endedAt, totalMoves, mode
 - **Move**: gameId, moveNumber, playerId, from, to, piece, capturedPiece, promotion, notation
 
 ## Project structure
@@ -88,9 +89,10 @@ src/
 │   ├── user/                    # User model, service, profile endpoints
 │   ├── game/                    # Game model, service, history endpoints
 │   ├── move/                    # Move model, service
-│   └── matchmaking/             # Queue + room code logic
+│   ├── matchmaking/             # Queue + room code logic
+│   └── bot/                     # Bot user, bot game creation, move choice
 ├── engine/chessEngine.js        # chess.js wrapper
-├── socket/                      # Socket.IO setup, auth, game + matchmaking handlers
+├── socket/                      # Socket.IO setup, auth, game + matchmaking + bot handlers, game lock
 ├── middlewares/                  # JWT auth, error handler, Multer upload
 └── utils/                       # ApiResponse, ApiError, logger, enums
 ```
@@ -115,3 +117,7 @@ src/
 - **Matchmaking**: FIFO Redis queue (auto-match) + 6-char room codes (private games).
 - **One active game per user** at any time.
 - **No refresh tokens** — JWT expires in 24h, user re-authenticates via OTP.
+- **Bot mode**: the bot is a seeded `User` document, so bot games flow through
+  the existing Game/Move schema and every existing code path unchanged. Its
+  reply is computed inline inside the player's game lock — no queues, no
+  workers, no separate service. Strategy is a random legal move (v1).

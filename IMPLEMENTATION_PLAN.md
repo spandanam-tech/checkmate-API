@@ -33,6 +33,9 @@ responsibilities:
 - **Reconnection**: disconnected players rejoin their active game room and receive
   the current Redis state.
 - **Draw only via stalemate** — no draw offers, no repetition rules in v1.
+- **Play against bot** — a single-player mode where the opponent is a
+  server-side bot that plays a random legal move. Fully separate from
+  matchmaking; see section 15.
 
 ### What Is NOT in Scope
 
@@ -148,8 +151,12 @@ src/
 │   │   ├── move.service.js           # Move creation, retrieval by gameId
 │   │   └── index.js                  # Re-exports model and service
 │   │
-│   └── matchmaking/
-│       ├── matchmaking.service.js    # Queue management, room code generation, pairing logic
+│   ├── matchmaking/
+│   │   ├── matchmaking.service.js    # Queue management, room code generation, pairing logic
+│   │   └── index.js                  # Re-exports service
+│   │
+│   └── bot/
+│       ├── bot.service.js            # Bot user seeding, bot game creation, random move choice
 │       └── index.js                  # Re-exports service
 │
 ├── engine/
@@ -158,8 +165,10 @@ src/
 ├── socket/
 │   ├── index.js                      # Socket.IO server creation, handler registration
 │   ├── socketAuth.js                 # Socket middleware — JWT verification on connection
+│   ├── gameLock.js                   # Per-game Redis lock (acquire / release)
 │   ├── gameHandler.js                # makeMove, resign, moveTimeout, reconnect events
-│   └── matchmakingHandler.js         # joinQueue, leaveQueue, createRoom, joinRoom events
+│   ├── matchmakingHandler.js         # joinQueue, leaveQueue, createRoom, joinRoom events
+│   └── botHandler.js                 # startBotGame event
 │
 ├── middlewares/
 │   ├── auth.middleware.js            # JWT verification for HTTP routes
@@ -182,7 +191,7 @@ src/
 | `config/` | External service connections (DB, Redis, SendGrid) | Business logic, route definitions |
 | `modules/` | Feature-specific code organized by domain | Cross-cutting utilities, socket handlers |
 | `modules/<name>/` | Model + service + controller + routes for one domain entity | Code for a different entity |
-| `engine/` | Chess rule logic — the chess.js wrapper | HTTP/socket handling, persistence |
+| `engine/` | Chess rule logic — the chess.js wrapper, incl. legal move generation | HTTP/socket handling, persistence, move *selection* strategy |
 | `socket/` | Socket.IO server setup and event handlers | REST route definitions, Mongoose models |
 | `middlewares/` | Express middleware (auth, errors, uploads) | Business logic, direct DB queries |
 | `utils/` | Shared utilities (response formatting, logging, enums) | Feature-specific logic |
@@ -390,12 +399,15 @@ Three collections, matching `PRODUCT_REQUIREMENTS.md`:
   result:         String, enum ["CHECKMATE", "RESIGNATION", "TIMEOUT", "DRAW", null], default null,
   startedAt:      Date, default Date.now,
   endedAt:        Date, default null,
-  totalMoves:     Number, default 0
+  totalMoves:     Number, default 0,
+  mode:           String, enum ["MULTIPLAYER", "BOT"], default "MULTIPLAYER"
 }
 // timestamps: true → createdAt, updatedAt
 ```
 
 **Changes from PRODUCT_REQUIREMENTS.md**:
+- `mode` added so bot games are distinguishable in history. It defaults to
+  `MULTIPLAYER`, so existing documents and the matchmaking flow are unaffected.
 - `WHITE_WIN` and `BLACK_WIN` removed from result enum. The winner is identified
   by `winnerId`. The result describes HOW the game ended (checkmate, resignation,
   timeout, draw), not WHO won. This avoids redundancy.
@@ -514,6 +526,10 @@ Single ioredis instance exported and imported where needed.
 }
 ```
 
+Bot games carry two extra fields, `"isBotGame": true` and
+`"botPlayerId": "<bot user id>"`. Their absence is what marks a game as an
+ordinary multiplayer game, so nothing about the multiplayer state changes.
+
 **Why FEN instead of 2D array:**
 chess.js natively uses FEN (Forsyth-Edwards Notation). FEN encodes the complete
 board position, active color, castling rights, en passant target, halfmove clock,
@@ -605,7 +621,7 @@ chess validation throws, Redis SET fails, or MongoDB persistence errors out.
 | `otp:{email}` | After successful verification, OR auto-expires after 300s |
 | `game:{gameId}` | After game ends (checkmate, resignation, timeout, stalemate) |
 | `room:{code}` | After second player joins, OR auto-expires after 600s |
-| `user:active-game:{userId}` | After game ends |
+| `user:active-game:{userId}` | After game ends. Never written for the bot user — the bot plays many games at once, so binding it to one would break the "one active game per user" rule. |
 | `user:online:{userId}` | After socket disconnect |
 | `lock:game:{gameId}` | Released (DEL) after move processing completes, OR auto-expires after 5s safety TTL |
 | `matchmaking:queue` entries | Removed when matched or when player leaves queue |
@@ -662,7 +678,7 @@ of the application to chess.js internals.
 |---------------|-----|
 | Board representation | FEN string (managed by chess.js `Chess` instance) |
 | Load game state | `new Chess(fen)` — reconstruct from Redis FEN |
-| Move validation | `chess.move({ from, to, promotion })` — returns null if illegal |
+| Move validation | `chess.move({ from, to, promotion })` — **throws** if illegal; the wrapper catches it and returns `{ valid: false }` |
 | Turn validation | `chess.turn()` — returns "w" or "b" |
 | Piece ownership | Check that the piece at `from` belongs to the current turn color |
 | King safety | chess.js automatically rejects moves that leave the king in check |
@@ -703,7 +719,16 @@ getGameStatus(fen) → { inCheck, isCheckmate, isStalemate, isGameOver, turn }
 
 // Validate that a FEN string is valid.
 isValidFen(fen) → boolean
+
+// Every legal move for the side to move. Each promotion piece is a separate
+// entry, so any entry can be played as-is. Empty at checkmate or stalemate.
+getLegalMoves(fen) → [{ from, to, promotion }]
 ```
+
+`getLegalMoves` is the engine's whole contribution to bot mode: it reports what
+is legal, and the bot service decides which of those to play. Keeping the
+*strategy* out of the engine means a stronger bot later is a change to one
+function in `bot.service.js`, not to the chess wrapper.
 
 ### Integration With Game Service
 
@@ -818,6 +843,7 @@ If authentication fails, the connection is rejected with an error event.
 | `makeMove` | `{ gameId, from, to, promotion? }` | Submit a chess move |
 | `resign` | `{ gameId }` | Resign from active game |
 | `moveTimeout` | `{ gameId }` | Report that the current player's 30s expired |
+| `startBotGame` | — | Start a single-player game against the bot |
 
 #### Server → Client
 
@@ -1140,11 +1166,26 @@ All routes prefixed with `/api/v1`.
 | **Reconnection** | Socket auth → check `user:active-game:{userId}` → rejoin room → receive `gameState` event with full Redis state. |
 | **Missing Redis state on reconnect** | If `game:{gameId}` key is missing (e.g., Redis restart), check MongoDB for game status. If ACTIVE in MongoDB but missing in Redis, mark game as ABANDONED in MongoDB. Notify player. |
 
+### Bot Mode Edge Cases
+
+| Edge Case | Behavior |
+|-----------|----------|
+| **Bot is assigned white** | The bot must move before the player can. `startBotGame` plays its opening move immediately after emitting `gameStarted`, under the game lock. |
+| **Player's move ends the game** | Checkmate/stalemate is settled first; the bot is never asked for a reply in a finished game, so it can never be asked for a move it does not have. |
+| **Bot has no legal move** | Impossible in normal flow — no legal moves means checkmate or stalemate, which is settled before the bot's turn. Logged as an error if it ever occurs, and the game is left untouched rather than corrupted. |
+| **Player already in a game** | `startBotGame` is rejected with "You are already in an active game" — bot games use the same `user:active-game:{userId}` key as multiplayer. |
+| **Player is queued, then starts a bot game** | The player is removed from `matchmaking:queue` so they cannot be matched with a human while playing the bot. |
+| **Player resigns a bot game** | The bot is recorded as `winnerId`, using the existing resignation path unchanged. |
+| **Player's turn times out** | The player loses on time to the bot, using the existing timeout path unchanged. |
+| **Bot's turn appears to time out** | The bot never forfeits on time. If its turn is somehow still pending (a persistence error cut its reply short), `moveTimeout` replays the bot's turn instead of awarding the player an unearned win. |
+| **Player disconnects mid bot game** | State stays in Redis exactly as for multiplayer. On reconnect the player rejoins `game:{gameId}` and receives `gameState`, which includes `isBotGame` and `botPlayerId`. `opponentDisconnected` reaches nobody, since the bot has no socket. |
+| **Many players vs the bot at once** | Each game is independent: the bot has no `user:active-game` key, and locks are per game. |
+
 ### Matchmaking Edge Cases
 
 | Edge Case | Behavior |
 |-----------|----------|
-| **Player in active game tries to join queue** | Rejected. Check `user:active-game:{userId}` before allowing queue join. |
+| **Player in active game tries to join queue** | Rejected. Check `user:active-game:{userId}` before allowing queue join. A bot game counts as an active game. |
 | **Player disconnects while in queue** | On disconnect, remove user from `matchmaking:queue`. |
 | **Player joins queue then goes offline** | Same as above — socket disconnect triggers queue removal. |
 | **Room code expires** | Redis TTL (10 min) auto-deletes the key. Creator is notified via `error` event if they're still connected. |
@@ -1461,6 +1502,190 @@ returns game + ordered moves. Frontend can display the move-by-move history.
 
 ---
 
+### Phase 11 — Play Against Bot
+
+**Goal**: Single-player mode against a bot that plays random legal moves,
+reusing the existing move pipeline end to end.
+
+**Files to create**:
+- `src/modules/bot/bot.service.js` — bot user seeding, bot game creation, move choice
+- `src/modules/bot/index.js` — Re-exports
+- `src/socket/botHandler.js` — `startBotGame` handler
+- `src/socket/gameLock.js` — per-game lock, extracted so both handlers share it
+
+**Files to modify**:
+- `src/engine/chessEngine.js` — add `getLegalMoves`
+- `src/utils/enums.js` — add `GameMode`
+- `src/modules/game/game.model.js` — add `mode`
+- `src/socket/gameHandler.js` — share one move pipeline; play the bot's reply
+- `src/socket/index.js` — register `botHandler`
+
+**Dependencies**: None new.
+
+**Prereqs**: Phase 8 complete (the move pipeline the bot reuses).
+
+**Result**: A player can start a bot game, play it to checkmate, stalemate,
+resignation or timeout, and see it in their history. Multiplayer is unchanged.
+
+**Verified**: both color assignments; the bot opening when it holds white; one
+`makeMove` persisting exactly two `Move` documents with contiguous, strictly
+alternating move numbers; `Game.totalMoves` matching the persisted count;
+checkmate settling with the correct winner and clearing Redis; resignation
+naming the bot as winner; out-of-turn and illegal moves rejected without the bot
+replying; and ~9,000 plies of random play without a single illegal bot move.
+
+---
+
+## 15. Play Against Bot
+
+### Goal
+
+A single-player mode where the opponent is a server-side bot. For v1 the bot
+only has to play a **legal** move — it is deliberately not a strong engine.
+
+### Guiding Constraint
+
+Bot mode reuses the existing chess/game infrastructure and adds nothing
+operational. No queues, no workers, no separate service, no Stockfish, no
+external chess API, no extra Redis structures. The bot's reply is computed
+inline, in the same function call that processed the player's move.
+
+### Why the Bot Is a Real User Document
+
+`Game.whitePlayerId`, `Game.blackPlayerId` and `Move.playerId` are all
+`required` ObjectId refs to `User`. The bot is therefore seeded as one ordinary
+`User` document:
+
+| Field | Value |
+|-------|-------|
+| `username` | `checkmate_bot` |
+| `name` | `Checkmate Bot` |
+| `email` | `bot@checkmate.local` |
+| `dateOfBirth` | epoch |
+
+The alternative — making the player id fields nullable and adding a `botColor` —
+would have forced changes to the schema, every history query, both `populate`
+chains, the participant check in `getGameDetail`, and the resignation and
+timeout winner logic. Seeding one document instead means **every existing path
+works on bot games unmodified**: moves persist, history populates the bot as the
+opponent, resignation and timeout name it as the winner.
+
+The document is created lazily on the first bot game via an atomic upsert keyed
+on email, so concurrent first-time requests cannot create duplicates, and the
+id is cached in memory afterwards.
+
+### Ownership of Bot State
+
+```
+Redis  game:{gameId}                 + isBotGame, botPlayerId
+       user:active-game:{humanId}      set for the human only
+       lock:game:{gameId}              unchanged, now also covers the bot's reply
+
+Mongo  Game.mode = "BOT"
+       Move documents for the bot, with playerId = the bot user
+```
+
+The bot deliberately has **no** `user:active-game` key. It plays an unbounded
+number of games simultaneously, so binding it to one game would make the second
+player's game unstartable.
+
+### Move Selection
+
+```
+current FEN
+      |
+      v
+chessEngine.getLegalMoves(fen)      <- chess.js generates every legal move
+      |
+      v
+botService.selectMove(...)          <- uniformly random pick
+      |
+      v
+chessEngine.validateAndApplyMove()  <- the same validation a human move gets
+      |
+      v
+Redis SET -> Mongo Move -> broadcast moveMade
+```
+
+The bot's move is validated by the same function as a player's move. The bot is
+not trusted more than a client is. Because chess.js both generated and validated
+the move from the same position, it cannot be illegal; if validation ever
+failed, it is logged and the game is left untouched rather than corrupted.
+
+Promotions are handled for free: chess.js emits each promotion piece as a
+separate legal move, so a randomly chosen promotion always carries a valid
+piece.
+
+### Turn Flow
+
+```
+Player                     Server                        Redis        Mongo
+  |                          |                             |            |
+  |-- startBotGame --------->|                             |            |
+  |                          |-- seed/lookup bot user -----|----------->|
+  |                          |-- random colors             |            |
+  |                          |-- Game(mode: BOT) ----------|----------->|
+  |                          |-- SET game:{id} (+isBotGame)|            |
+  |                          |-- SET user:active-game:human|            |
+  |<-- gameStarted ----------|                             |            |
+  |                          |                             |            |
+  |   (if the bot is white, it opens here, under the lock) |            |
+  |<-- moveMade (bot) -------|                             |            |
+  |                          |                             |            |
+  |-- makeMove ------------->|                             |            |
+  |                          |-- acquire lock:game:{id} -->|            |
+  |                          |-- validate turn + timer     |            |
+  |                          |-- validate move (chess.js)  |            |
+  |                          |-- SET game, Move, totalMoves|----------->|
+  |<-- moveMade (player) ----|                             |            |
+  |                          |-- game over? --> gameEnded  |            |
+  |                          |-- else: bot replies         |            |
+  |                          |   select + apply + persist -|----------->|
+  |<-- moveMade (bot) -------|                             |            |
+  |                          |-- game over? --> gameEnded  |            |
+  |                          |-- release lock (finally) -->|            |
+```
+
+### Why the Bot Moves Inside the Player's Lock
+
+The player's move and the bot's reply are applied inside a single
+`lock:game:{gameId}` critical section. That makes the pair atomic: no other
+request can observe a position where the player has moved but the bot has not,
+and the existing `finally` release covers both. It also needs no new locking
+primitive — only the extraction of `acquireLock` / `releaseLock` into
+`socket/gameLock.js` so `botHandler` can reuse them for the bot's opening move.
+
+### Shared Move Pipeline
+
+`gameHandler.js` was factored into three internal helpers so the player's move
+and the bot's move run the *same* code rather than two parallel copies:
+
+| Helper | Responsibility |
+|--------|---------------|
+| `applyMove(...)` | Validate, mutate Redis state, persist the `Move`, increment `totalMoves`, broadcast `moveMade` |
+| `settleIfGameOver(...)` | End the game on checkmate or stalemate; returns whether it ended |
+| `playBotTurn(...)` | Choose the bot's move and run it through the two helpers above |
+
+The player's path is unchanged in behaviour and ordering — it now just calls the
+helpers. Multiplayer games never reach `playBotTurn`, because it returns
+immediately unless `isBotGame` is set and the side to move is the bot.
+
+### What Was Deliberately Not Done
+
+- **No difficulty levels.** v1 is a single random-move bot.
+- **No artificial "thinking" delay.** The bot replies instantly; pacing is a
+  frontend concern.
+- **No new draw conditions.** Games still end only on checkmate, stalemate,
+  resignation or timeout, per the existing product rules. A random bot reaches
+  dead-drawn material more often than a human would, and such a game runs until
+  the player resigns or a turn times out. Adding insufficient-material or
+  repetition draws would change the rules for multiplayer too, so it is left as
+  a separate decision.
+- **No REST endpoint.** Game creation is a socket event, consistent with
+  `joinQueue` and `joinRoom`. History is already covered by `GET /games`.
+
+---
+
 ## Environment Variables
 
 ```env
@@ -1513,3 +1738,7 @@ OTP_TTL_SECONDS=300
 | Room codes | 6-char alphanumeric | UUID, word-based |
 | OTP | 4-digit, 5-min, Redis-stored | 6-digit, DB-stored |
 | Profile image | Multer disk upload | URL only, GridFS, Cloudinary |
+| Bot opponent identity | A seeded `User` document | Nullable player ids, a synthetic non-user id |
+| Bot move strategy (v1) | Uniformly random legal move | Minimax, evaluation heuristics, Stockfish, external APIs |
+| Bot execution | Inline, inside the mover's existing game lock | Queues, workers, a separate bot service, Kafka |
+| Bot game creation | Dedicated `startBotGame` socket event | Reusing the matchmaking queue or room codes |
