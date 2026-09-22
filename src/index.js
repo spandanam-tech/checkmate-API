@@ -10,6 +10,6 @@ const server = createServer(app);
 // Attach Socket.IO to the HTTP server
 initSocket(server);
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   logger.info(`Server running on port ${PORT}`);
 });

@@ -53,6 +53,10 @@ export const initSocket = (server) => {
       // Remove from matchmaking queue
       await matchmakingService.leaveQueue(userId);
 
+      // Drop any private room they were waiting in, so the code stops working
+      // instead of lingering until its TTL and matching into an empty game.
+      await matchmakingService.cancelRoom(userId);
+
       // Notify opponent if in active game
       const gameId = await redis.get(`user:active-game:${userId}`);
       if (gameId) {

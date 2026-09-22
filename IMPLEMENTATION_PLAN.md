@@ -504,6 +504,7 @@ Single ioredis instance exported and imported where needed.
 | `game:{gameId}` | String (JSON) | None (deleted on game end) | Active game state |
 | `matchmaking:queue` | List | None | FIFO matchmaking queue |
 | `room:{code}` | String (JSON) | 600s (10 min) | Private room waiting for second player |
+| `user:room:{userId}` | String | 600s (matches the room) | Reverse lookup — which room a user has open, so the server can cancel it without the client supplying the code |
 | `user:active-game:{userId}` | String | None (deleted on game end) | Maps user to their active gameId |
 | `user:online:{userId}` | String | None (deleted on disconnect) | Tracks online status + socketId |
 | `lock:game:{gameId}` | String | 5s (safety TTL) | Per-game lock to serialize move processing |
@@ -608,11 +609,23 @@ chess validation throws, Redis SET fails, or MongoDB persistence errors out.
 }
 ```
 
+A second key, `user:room:{userId}` → `code`, is written with the same TTL. The
+room mapping is deliberately bidirectional: `room:{code}` answers "who owns this
+code?" for a joiner, and `user:room:{userId}` answers "which code does this user
+own?" for a cancel. Without the reverse key the server cannot cancel a room
+unless the client still remembers the code, which fails after a reload.
+
 - TTL: 600 seconds (10 minutes). If no one joins, the room expires.
+- **One open room per user.** `createRoom` cancels the caller's previous room
+  first, so old codes cannot accumulate or be joined after a new code is issued.
 - When a second player joins with the code:
   1. `GET room:{code}` → get creator.
-  2. `DEL room:{code}` → room consumed.
+  2. `DEL room:{code}` and `DEL user:room:{creatorId}` → room consumed.
   3. Create game, assign random colors, initialize Redis game state.
+- **Cancelling** (`cancelRoom`, or the creator disconnecting) deletes both keys.
+  Deleting `room:{code}` is the whole invalidation: `joinRoom` already rejects a
+  missing key, so a later join attempt gets "Room not found or expired". No
+  separate revocation list or tombstone is needed.
 
 ### Expiration / Deletion Strategy
 
@@ -620,7 +633,8 @@ chess validation throws, Redis SET fails, or MongoDB persistence errors out.
 |-----|-------------|
 | `otp:{email}` | After successful verification, OR auto-expires after 300s |
 | `game:{gameId}` | After game ends (checkmate, resignation, timeout, stalemate) |
-| `room:{code}` | After second player joins, OR auto-expires after 600s |
+| `room:{code}` | After second player joins, cancelled via `cancelRoom`, superseded by a new `createRoom`, creator disconnects, OR auto-expires after 600s |
+| `user:room:{userId}` | Always deleted together with `room:{code}` |
 | `user:active-game:{userId}` | After game ends. Never written for the bot user — the bot plays many games at once, so binding it to one would break the "one active game per user" rule. |
 | `user:online:{userId}` | After socket disconnect |
 | `lock:game:{gameId}` | Released (DEL) after move processing completes, OR auto-expires after 5s safety TTL |
@@ -839,6 +853,7 @@ If authentication fails, the connection is rejected with an error event.
 | `joinQueue` | — | Add authenticated user to matchmaking FIFO queue |
 | `leaveQueue` | — | Remove user from matchmaking queue |
 | `createRoom` | — | Create private room, receive 6-char code |
+| `cancelRoom` | — | Withdraw your open room, invalidating the code |
 | `joinRoom` | `{ code }` | Join a private room by code |
 | `makeMove` | `{ gameId, from, to, promotion? }` | Submit a chess move |
 | `resign` | `{ gameId }` | Resign from active game |
@@ -852,6 +867,7 @@ If authentication fails, the connection is rejected with an error event.
 | `queueJoined` | — | Confirmation: you are in the queue |
 | `queueLeft` | — | Confirmation: you left the queue |
 | `roomCreated` | `{ code }` | Room code for sharing |
+| `roomCancelled` | `{ code }` | Your room was withdrawn; the code no longer works |
 | `gameStarted` | `{ gameId, whitePlayerId, blackPlayerId, fen, yourColor, turnStartedAt }` | Game is ready, board initialized |
 | `moveMade` | `{ gameId, from, to, piece, capturedPiece, promotion, notation, fen, moveNumber, currentTurn, isCheck, turnStartedAt }` | Valid move broadcast to both players |
 | `moveRejected` | `{ gameId, reason }` | Move was invalid (sent only to the submitter) |
@@ -1189,6 +1205,11 @@ All routes prefixed with `/api/v1`.
 | **Player disconnects while in queue** | On disconnect, remove user from `matchmaking:queue`. |
 | **Player joins queue then goes offline** | Same as above — socket disconnect triggers queue removal. |
 | **Room code expires** | Redis TTL (10 min) auto-deletes the key. Creator is notified via `error` event if they're still connected. |
+| **Creator cancels the room** | `cancelRoom` deletes `room:{code}` and `user:room:{userId}`, and emits `roomCancelled`. Any later join attempt hits the existing missing-key path and is rejected. |
+| **Cancel with no open room** | `cancelRoom` returns null; `error: "You have no open room to cancel"`. Cancelling twice is a safe no-op, not an error. |
+| **Creator disconnects while waiting** | The room is cancelled on `disconnect`, next to the existing `leaveQueue` cleanup. Without this the code stayed joinable for up to 10 minutes and could match someone into a game against an absent opponent. |
+| **Creator clicks Create Room repeatedly** | Each `createRoom` cancels the previous room first, so exactly one code is live per user. |
+| **Someone joins a cancelled code** | `GET room:{code}` returns null → `error: "Room not found or expired"` — the same path as an expired or already-used code. |
 | **Invalid room code** | `GET room:{code}` returns null. Emit `error` to joining player. |
 | **Player tries to join own room** | Rejected. Check `creatorId !== joiningUserId`. |
 

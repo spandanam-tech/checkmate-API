@@ -97,6 +97,28 @@ const authService = {
     return { registrationToken, isNewUser: true };
   },
 
+  // Blacklist a JWT so it can no longer be used
+  async logout(token) {
+    try {
+      const decoded = jwt.decode(token);
+      if (!decoded || !decoded.exp) return;
+
+      const remainingSeconds = decoded.exp - Math.floor(Date.now() / 1000);
+      if (remainingSeconds <= 0) return;
+
+      await redis.set(`blacklist:${token}`, "1", "EX", remainingSeconds);
+    } catch (error) {
+      logger.error(`Logout blacklist error: ${error.message}`);
+      throw new ApiError(500, "Failed to logout");
+    }
+  },
+
+  // Check if a token has been blacklisted
+  async isTokenBlacklisted(token) {
+    const result = await redis.get(`blacklist:${token}`);
+    return result !== null;
+  },
+
   // Register a new user
   async register({ email, username, name, dateOfBirth, profileImage }) {
     // Check if username is taken
