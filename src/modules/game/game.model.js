@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { GameStatus, GameResult } from "../../utils/enums.js";
+import { GameStatus, GameResult, GameMode } from "../../utils/enums.js";
 
 const gameSchema = new mongoose.Schema(
   {
@@ -46,6 +46,12 @@ const gameSchema = new mongoose.Schema(
     totalMoves: {
       type: Number,
       default: 0,
+    },
+
+    mode: {
+      type: String,
+      enum: Object.values(GameMode),
+      default: GameMode.MULTIPLAYER,
     },
   },
   {

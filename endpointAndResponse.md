@@ -308,6 +308,7 @@ GET /api/v1/games?page=1&limit=10
         },
         "status": "COMPLETED",
         "result": "CHECKMATE",
+        "mode": "MULTIPLAYER",
         "startedAt": "2024-06-15T10:00:00.000Z",
         "endedAt": "2024-06-15T10:35:00.000Z",
         "totalMoves": 47
@@ -345,6 +346,7 @@ GET /api/v1/games/:gameId
       "winnerId": { "_id": "...", "username": "magnus", "name": "Magnus Carlsen" },
       "status": "COMPLETED",
       "result": "CHECKMATE",
+      "mode": "MULTIPLAYER",
       "startedAt": "2024-06-15T10:00:00.000Z",
       "endedAt": "2024-06-15T10:35:00.000Z",
       "totalMoves": 4
@@ -471,6 +473,28 @@ Server responds with `gameStarted` (to both players).
 
 ---
 
+#### startBotGame
+
+Start a single-player game against the bot. Bot games are separate from
+matchmaking — this never touches the queue or room codes.
+
+```js
+socket.emit("startBotGame");
+```
+
+Colors are assigned randomly, as in multiplayer. Server responds with
+`gameStarted`; if the bot was assigned white it immediately follows with a
+`moveMade` for its opening move.
+
+**Errors** (emitted as `error`)
+
+| Message | When |
+|---------|------|
+| You are already in an active game | The user has an active multiplayer or bot game |
+| Failed to start bot game | Unexpected server error |
+
+---
+
 #### makeMove
 
 Submit a chess move.
@@ -543,6 +567,25 @@ Server validates elapsed time and responds with `gameEnded` if confirmed.
 }
 ```
 
+**Bot games only** — `startBotGame` adds two extra fields. They are absent for
+multiplayer games, so a missing `mode` means `MULTIPLAYER`:
+
+```json
+{
+  "gameId": "64f1a2b3c4d5e6f7a8b9c0d9",
+  "whitePlayerId": "64f1...d1",
+  "blackPlayerId": "64f1...bot",
+  "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+  "yourColor": "black",
+  "turnStartedAt": 1695000000000,
+  "mode": "BOT",
+  "botPlayerId": "64f1...bot"
+}
+```
+
+The bot is a regular user document, so `whitePlayerId` / `blackPlayerId` are
+ordinary user ids — compare against `botPlayerId` to tell which side it is.
+
 #### moveMade
 ```json
 {
@@ -560,6 +603,11 @@ Server validates elapsed time and responds with `gameEnded` if confirmed.
   "turnStartedAt": 1695000001000
 }
 ```
+
+In a **bot game** a single `makeMove` produces two `moveMade` events in order:
+the player's move, then the bot's reply. Both are applied under the same
+per-game lock, so the player's move never appears without the bot's answer
+unless the player's move ended the game.
 
 #### moveRejected
 ```json
@@ -603,6 +651,8 @@ Result values: `CHECKMATE`, `RESIGNATION`, `TIMEOUT`, `DRAW`
 }
 ```
 
+Bot games additionally carry `"isBotGame": true` and `"botPlayerId"`.
+
 #### opponentDisconnected
 ```json
 {
@@ -636,6 +686,7 @@ Possible messages:
 - `Failed to leave queue`
 - `Failed to create room`
 - `Failed to join room`
+- `Failed to start bot game`
 
 ---
 

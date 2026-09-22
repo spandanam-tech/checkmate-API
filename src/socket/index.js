@@ -2,6 +2,7 @@ import { Server } from "socket.io";
 import socketAuth from "./socketAuth.js";
 import matchmakingHandler from "./matchmakingHandler.js";
 import gameHandler from "./gameHandler.js";
+import botHandler from "./botHandler.js";
 import redis from "../config/redis.js";
 import { matchmakingService } from "../modules/matchmaking/index.js";
 import logger from "../utils/logger.js";
@@ -40,6 +41,7 @@ export const initSocket = (server) => {
     // Register event handlers
     matchmakingHandler(io, socket);
     gameHandler(io, socket);
+    botHandler(io, socket);
 
     // Handle disconnect
     socket.on("disconnect", async () => {

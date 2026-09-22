@@ -15,3 +15,8 @@ export const PieceColor = {
   WHITE: "white",
   BLACK: "black",
 };
+
+export const GameMode = {
+  MULTIPLAYER: "MULTIPLAYER",
+  BOT: "BOT",
+};
