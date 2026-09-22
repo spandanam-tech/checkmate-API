@@ -92,10 +92,25 @@ export default function matchmakingHandler(io, socket) {
 
       const code = await matchmakingService.createRoom(userId);
       socket.emit("roomCreated", { code });
-      logger.info(`${userId} created room ${code}`);
     } catch (error) {
       logger.error(`createRoom error: ${error.message}`);
       socket.emit("error", { message: "Failed to create room" });
+    }
+  });
+
+  // cancelRoom — creator withdraws their private room, invalidating the code
+  socket.on("cancelRoom", async () => {
+    try {
+      const code = await matchmakingService.cancelRoom(socket.user.userId);
+
+      if (!code) {
+        return socket.emit("error", { message: "You have no open room to cancel" });
+      }
+
+      socket.emit("roomCancelled", { code });
+    } catch (error) {
+      logger.error(`cancelRoom error: ${error.message}`);
+      socket.emit("error", { message: "Failed to cancel room" });
     }
   });
 

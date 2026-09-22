@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import redis from "../config/redis.js";
 import { userService } from "../modules/user/index.js";
 import logger from "../utils/logger.js";
 
@@ -12,6 +13,12 @@ const socketAuth = async (socket, next) => {
 
     if (!token) {
       return next(new Error("Authentication required"));
+    }
+
+    // Check if token has been blacklisted (logout)
+    const blacklisted = await redis.get(`blacklist:${token}`);
+    if (blacklisted) {
+      return next(new Error("Token has been revoked"));
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);

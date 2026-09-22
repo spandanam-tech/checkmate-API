@@ -79,6 +79,18 @@ const authController = {
       next(error);
     }
   },
+  // POST /auth/logout
+  async logout(req, res, next) {
+    try {
+      const token = req.headers.authorization.split(" ")[1];
+      await authService.logout(token);
+
+      const response = new ApiResponse(200, null, "Logged out successfully");
+      res.status(200).json(response);
+    } catch (error) {
+      next(error);
+    }
+  },
 };
 
 export default authController;

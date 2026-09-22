@@ -75,8 +75,12 @@ const matchmakingService = {
 
   /**
    * Create a private room with a code.
+   * One open room per user — any previous room is cancelled first, so an old
+   * code can never be joined after a new one has been issued.
    */
   async createRoom(userId) {
+    await this.cancelRoom(userId);
+
     const code = this.generateRoomCode();
 
     await redis.set(
@@ -85,6 +89,34 @@ const matchmakingService = {
       "EX",
       ROOM_CODE_TTL
     );
+
+    // Reverse lookup, same TTL: lets the server find a user's room without the
+    // client having to remember the code (e.g. after a reload or a disconnect).
+    await redis.set(`user:room:${userId}`, code, "EX", ROOM_CODE_TTL);
+
+    logger.info(`Room ${code} opened by ${userId}`);
+
+    return code;
+  },
+
+  /**
+   * Cancel the user's open room, if they have one.
+   * Returns the cancelled code, or null when there was nothing to cancel.
+   *
+   * Deleting `room:{code}` is all that is needed to invalidate the code —
+   * `joinRoom` already rejects a missing key, so a later join attempt gets
+   * "Room not found or expired".
+   */
+  async cancelRoom(userId) {
+    const code = await redis.get(`user:room:${userId}`);
+
+    if (!code) {
+      return null;
+    }
+
+    await redis.del(`room:${code}`, `user:room:${userId}`);
+
+    logger.info(`Room ${code} cancelled by ${userId}`);
 
     return code;
   },
@@ -101,8 +133,9 @@ const matchmakingService = {
 
     const { creatorId } = JSON.parse(roomData);
 
-    // Delete the room — it's consumed
-    await redis.del(`room:${code}`);
+    // Delete the room — it's consumed. The reverse key goes with it, otherwise
+    // the creator would look like they still have an open room.
+    await redis.del(`room:${code}`, `user:room:${creatorId}`);
 
     return creatorId;
   },

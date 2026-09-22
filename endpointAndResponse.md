@@ -459,6 +459,33 @@ socket.emit("createRoom");
 
 Server responds with `roomCreated`.
 
+A user may hold only **one** open room. Creating a second room cancels the
+first, so a previously shared code stops working.
+
+---
+
+#### cancelRoom
+
+Withdraw your open private room. The code is invalidated immediately — anyone
+who tries it afterwards gets `error: "Room not found or expired"`.
+
+```js
+socket.emit("cancelRoom");
+```
+
+No payload: the server finds the caller's room itself, so the client does not
+need to remember the code. Server responds with `roomCancelled`.
+
+The room is also cancelled automatically when the creator's socket
+disconnects, so a stale code cannot match someone into an empty game.
+
+**Errors** (emitted as `error`)
+
+| Message | When |
+|---------|------|
+| You have no open room to cancel | The caller has no open room |
+| Failed to cancel room | Unexpected server error |
+
 ---
 
 #### joinRoom
@@ -554,6 +581,16 @@ Server validates elapsed time and responds with `gameEnded` if confirmed.
   "code": "X7K2M9"
 }
 ```
+
+#### roomCancelled
+```json
+{
+  "code": "X7K2M9"
+}
+```
+
+Sent to the creator when their room is withdrawn. The code is no longer
+joinable. Treat it like `queueLeft` — return the UI to idle.
 
 #### gameStarted
 ```json
@@ -685,6 +722,8 @@ Possible messages:
 - `Failed to join queue`
 - `Failed to leave queue`
 - `Failed to create room`
+- `You have no open room to cancel`
+- `Failed to cancel room`
 - `Failed to join room`
 - `Failed to start bot game`
 

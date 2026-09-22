@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import redis from "../config/redis.js";
 import { userService } from "../modules/user/index.js";
 import ApiError from "../utils/ApiError.js";
 
@@ -11,6 +12,13 @@ const authMiddleware = async (req, res, next) => {
     }
 
     const token = header.split(" ")[1];
+
+    // Check if token has been blacklisted (logout)
+    const blacklisted = await redis.get(`blacklist:${token}`);
+    if (blacklisted) {
+      throw new ApiError(401, "Token has been revoked");
+    }
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     const user = await userService.findById(decoded.userId);
